@@ -144,3 +144,88 @@ def agrupar_e_agregar(grupo: str, coluna: str, funcao: str) -> dict:
             for k, v in resultado.items()
         },
     }
+
+###################################################
+## Ranking ########################################
+###################################################
+
+@tool(
+        description=(
+                "Retorna um ranking das linhas do dataset de COVID-19 com base em uma coluna numerica. "
+                "Util para perguntas como: estados com mais casos, mais obitos, maior taxa de mortalidade "
+                "ou maior populacao. Permite aplicar um filtro pandas query antes do ranking."
+        ),
+        parameters={
+                "type": "object",
+                "properties": {
+                        "coluna_ranking": {
+                                "type": "string",
+                                "description": "Coluna numerica usada para ordenar o ranking.",
+                        },
+                        "filtro": {
+                                "type": "string",
+                                "description": (
+                                        "Filtro opcional em sintaxe pandas query. "
+                                        "Exemplo: \"is_last == True and place_type == 'state'\"."
+                                ),
+                        },
+                        "top_n": {
+                              "type": "integer",
+                                "description": "Quantidade de linhas no ranking. Default: 10.",
+                        },
+                        "ordem": {
+                                "type": "string",
+                                "enum": ["desc", "asc"],
+                                "description": "desc para maiores valores, asc para menores valores.",
+                        },
+                },
+                "required": ["coluna_ranking"],
+        },
+)
+def ranking_covid(
+        coluna_ranking: str,
+        filtro: str = "",
+        top_n: int = 10,
+        ordem: str = "desc",
+) -> dict:
+        df = state.require_loaded()
+        if coluna_ranking not in df.columns:
+                return {"erro": f"Coluna '{coluna_ranking}' nao existe."}
+        if not pd.api.types.is_numeric_dtype(df[coluna_ranking]):
+                return {"erro": f"Coluna '{coluna_ranking}' nao e numerica."}
+        dados = df.copy()
+        if filtro:
+                try:
+                        dados = dados.query(filtro)
+                except Exception as e:
+                        return {
+                                "erro": f"Filtro invalido: {e}",
+                                "dica": "Verifique nomes de colunas e strings entre aspas.",
+                        }
+        if dados.empty:
+                return {"erro": "Nenhuma linha encontrada para o filtro informado."}
+        ascendente = ordem == "asc"
+        colunas_saida = [
+                c for c in [
+                        "date",
+                        "state",
+                        "place_type",
+                        "last_available_confirmed",
+                        "last_available_deaths",
+                        "last_available_death_rate",
+                        "estimated_population",
+                        coluna_ranking,
+                ]
+                if c in dados.columns
+        ]
+        ranking = (
+                dados.sort_values(coluna_ranking, ascending=ascendente)
+                .head(top_n)[colunas_saida]
+        )
+        return {
+                "coluna_ranking": coluna_ranking,
+                "filtro": filtro,
+                "top_n": top_n,
+                "ordem": ordem,
+                "resultados": ranking.to_dict(orient="records"),
+        }

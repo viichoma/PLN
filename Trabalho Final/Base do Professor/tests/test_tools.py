@@ -133,3 +133,9 @@ def test_detectar_outliers_iqr_identifica_o_100():
 def test_detectar_outliers_metodo_invalido():
     resultado = detectar_outliers("idade", metodo="foo")
     assert "erro" in resultado
+
+def test_detectar_outliers_zscore_roda_sem_erro():
+        resultado = detectar_outliers("idade", metodo="zscore")
+        assert "erro" not in resultado
+        assert resultado["metodo"] == "zscore"
+        assert "total_outliers" in resultado

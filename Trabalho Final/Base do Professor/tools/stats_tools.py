@@ -131,6 +131,28 @@ def detectar_outliers(coluna: str, metodo: str = "iqr") -> dict:
         }
 
     elif metodo == "zscore":
+        media = serie.mean()
+        desvio = serie.std(ddof=0)
+
+        if desvio == 0 or pd.isna(desvio):
+            return {
+                "coluna": coluna,
+                "metodo": "zscore",
+                "erro": "Não é possível calcular z-score: desvio-padrão igual a zero ou inválido."
+            }
+        zscores = (serie - media) / desvio
+        outliers = serie[zscores.abs() > 3]
+
+        return {
+            "coluna": coluna,
+            "metodo": "zscore",
+            "media": round(float(media), 3),
+            "desvio_padrao": round(float(desvio), 3),
+            "limite_z": 3,
+            "total_outliers": int(len(outliers)),
+            "porcentagem": round(len(outliers) / len(serie) * 100, 2),
+            "exemplos": [round(float(v), 3) for v in outliers.head(5).tolist()]
+        }
         # TODO (alunos): implementar a detecção por z-score.
         #
         # Passos:
