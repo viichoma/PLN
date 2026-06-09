@@ -1,119 +1,116 @@
-"""
-Infraestrutura comum das ferramentas (tools).
+"""Infraestrutura comum das ferramentas do agente.
 
 Define:
-  - Estado compartilhado (o DataFrame em memória)
-  - Decorador @tool que registra funções como ferramentas do agente
-  - Estruturas para descrever cada tool ao LLM
+- DataState: mantém o DataFrame carregado em memória;
+- @tool: decorador de registro;
+- formatos de tools para OpenAI/DeepSeek e Anthropic.
 """
-
 from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import Callable, Any
-import inspect
+
+from dataclasses import dataclass
+from typing import Any, Callable
+
 import pandas as pd
 
+from config import CSV_SEPARATOR
 
-# ============================================================
-# Estado compartilhado
-# ============================================================
 
 class DataState:
+    """Estado compartilhado entre as tools.
+
+    O DataFrame é carregado uma vez pela CLI ou pelo benchmark. As tools acessam
+    esse mesmo estado, sem recarregar o CSV a cada chamada.
     """
-    Mantém o DataFrame atual em memória.
-    Todas as tools acessam o mesmo objeto, evitando recarregar o CSV
-    a cada chamada.
-    """
+
     def __init__(self) -> None:
         self.df: pd.DataFrame | None = None
         self.path: str | None = None
 
     def load(self, path: str) -> None:
-        """Carrega um CSV no estado."""
-        self.df = pd.read_csv(path)
+        """Carrega um CSV e faz pequenas normalizações úteis para EDA."""
+        df = pd.read_csv(path, sep=CSV_SEPARATOR)
+
+        # Normalização leve para o dataset COVID-19 Brasil.IO.
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+
+        # Garante que booleanos lidos como texto sejam convertidos quando aplicável.
+        for col in df.columns:
+            if df[col].dtype == "object":
+                valores = set(str(v).lower() for v in df[col].dropna().unique()[:5])
+                if valores and valores.issubset({"true", "false"}):
+                    df[col] = df[col].map(lambda x: str(x).lower() == "true")
+
+        self.df = df
         self.path = path
 
     def require_loaded(self) -> pd.DataFrame:
-        """Retorna o DataFrame ou levanta erro se nada foi carregado."""
         if self.df is None:
-            raise RuntimeError(
-                "Nenhum dataset carregado. Carregue um CSV antes de chamar as tools."
-            )
+            raise RuntimeError("Nenhum dataset carregado. Carregue um CSV antes de chamar as tools.")
         return self.df
 
 
-# Instância global - usada por todas as tools
 state = DataState()
 
 
-# ============================================================
-# Registro de tools
-# ============================================================
-
 @dataclass
 class ToolSpec:
-    """Descrição de uma tool para ser passada ao LLM."""
     name: str
     description: str
-    parameters: dict[str, Any]   # JSON Schema dos parâmetros
-    function: Callable           # A função Python que executa de fato
+    parameters: dict[str, Any]
+    function: Callable[..., dict]
 
 
-# Lista global de todas as tools registradas
 TOOL_REGISTRY: list[ToolSpec] = []
 
 
 def tool(description: str, parameters: dict[str, Any]):
-    """
-    Decorador que registra uma função como tool disponível para o agente.
+    """Registra uma função Python como tool disponível ao LLM."""
 
-    Uso:
-        @tool(
-            description="Retorna a lista de colunas e seus tipos.",
-            parameters={
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
+    def decorator(func: Callable[..., dict]):
+        TOOL_REGISTRY.append(
+            ToolSpec(
+                name=func.__name__,
+                description=description,
+                parameters=parameters,
+                function=func,
+            )
         )
-        def listar_colunas() -> dict:
-            ...
-
-    O `description` é lido pelo LLM para decidir QUANDO chamar a tool.
-    O `parameters` segue o padrão JSON Schema usado por function calling.
-    """
-    def decorator(func: Callable):
-        spec = ToolSpec(
-            name=func.__name__,
-            description=description,
-            parameters=parameters,
-            function=func,
-        )
-        TOOL_REGISTRY.append(spec)
         return func
+
     return decorator
 
 
 def get_tool_by_name(name: str) -> ToolSpec | None:
-    """Busca uma tool pelo nome (usado pelo orquestrador)."""
     for spec in TOOL_REGISTRY:
         if spec.name == name:
             return spec
     return None
 
 
-def all_tools_for_llm() -> list[dict]:
-    """
-    Retorna a lista de tools no formato que a API da Anthropic espera.
+def all_tools_for_llm(provider: str = "deepseek") -> list[dict[str, Any]]:
+    """Retorna as tools no formato esperado pelo provedor.
 
-    Outros provedores (OpenAI, Google) têm formatos parecidos mas com
-    diferenças sutis — adapte no llm_client.py se trocar de provedor.
+    DeepSeek usa API compatível com OpenAI:
+    {"type": "function", "function": {name, description, parameters}}
     """
-    return [
-        {
-            "name": t.name,
-            "description": t.description,
-            "input_schema": t.parameters,
-        }
-        for t in TOOL_REGISTRY
-    ]
+    if provider.lower() in {"deepseek", "openai"}:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                },
+            }
+            for t in TOOL_REGISTRY
+        ]
+
+    if provider.lower() == "anthropic":
+        return [
+            {"name": t.name, "description": t.description, "input_schema": t.parameters}
+            for t in TOOL_REGISTRY
+        ]
+
+    raise ValueError(f"Provider não suportado: {provider}")

@@ -57,7 +57,7 @@ def rodar_benchmark():
     try:
         agente = Agent()
     except RuntimeError as e:
-        console.print(f"[red]Erro:[/red] {e}")
+        console.print(f"[red]Erro ao criar Agent:[/red] {e}")
         return
 
     # ============ 4. Rodar cada pergunta ============
@@ -73,7 +73,7 @@ def rodar_benchmark():
         task = progress.add_task("Avaliando", total=len(perguntas))
 
         for p in perguntas:
-            progress.update(task, description=f"[{p['id']}] {p['pergunta'][:50]}...")
+            progress.update(task, description=f"[{p['id']}] {p['pergunta'][:60]}...")
 
             resultado = agente.perguntar(p["pergunta"])
 

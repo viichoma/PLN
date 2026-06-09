@@ -1,27 +1,14 @@
-"""
-Ferramentas estatísticas: correlação e detecção de outliers.
-
-TODO (alunos):
-  - A função detectar_outliers tem apenas o método IQR implementado.
-    Adicionem o método z-score como exercício.
-  - Considerem se faz sentido adicionar uma tool de teste de hipótese
-    (ex.: teste t, qui-quadrado) como tool EXTRA para pontuar no bônus.
-"""
+"""Tools estatísticas: correlação e outliers."""
+from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from .base import tool, state
 
+from .base import state, tool
 
-# ============================================================
-# correlacao
-# ============================================================
 
 @tool(
-    description=(
-        "Calcula a correlação entre duas colunas numéricas. "
-        "Aceita método Pearson (linear) ou Spearman (monotônica/ordinal)."
-    ),
+    description="Calcula correlação Pearson ou Spearman entre duas colunas numéricas.",
     parameters={
         "type": "object",
         "properties": {
@@ -30,59 +17,53 @@ from .base import tool, state
             "metodo": {
                 "type": "string",
                 "enum": ["pearson", "spearman"],
-                "description": "Método de correlação (default: pearson).",
+                "description": "Método de correlação. Default: pearson.",
             },
         },
         "required": ["coluna_a", "coluna_b"],
     },
 )
 def correlacao(coluna_a: str, coluna_b: str, metodo: str = "pearson") -> dict:
-    """Correlação entre duas colunas numéricas."""
     df = state.require_loaded()
-
-    # Validações
     for col in (coluna_a, coluna_b):
         if col not in df.columns:
             return {"erro": f"Coluna '{col}' não existe."}
         if not pd.api.types.is_numeric_dtype(df[col]):
             return {"erro": f"Coluna '{col}' não é numérica (tipo: {df[col].dtype})."}
-
     if metodo not in {"pearson", "spearman"}:
-        return {"erro": f"Método '{metodo}' inválido. Use 'pearson' ou 'spearman'."}
+        return {"erro": "Método inválido. Use 'pearson' ou 'spearman'."}
 
-    valor = df[coluna_a].corr(df[coluna_b], method=metodo)
+    pares = df[[coluna_a, coluna_b]].dropna()
+    if len(pares) < 2:
+        return {"erro": "Não há pares válidos suficientes para calcular correlação."}
 
-    # Interpretação simples baseada em magnitude
-    abs_val = abs(valor)
+    valor = pares[coluna_a].corr(pares[coluna_b], method=metodo)
+    if pd.isna(valor):
+        return {"erro": "Correlação indefinida; uma das colunas pode ser constante."}
+
+    abs_val = abs(float(valor))
     if abs_val < 0.1:
-        interpretacao = "desprezível"
+        intensidade = "desprezível"
     elif abs_val < 0.3:
-        interpretacao = "fraca"
+        intensidade = "fraca"
     elif abs_val < 0.7:
-        interpretacao = "moderada"
+        intensidade = "moderada"
     else:
-        interpretacao = "forte"
-
+        intensidade = "forte"
     sinal = "positiva" if valor > 0 else "negativa"
 
     return {
         "coluna_a": coluna_a,
         "coluna_b": coluna_b,
         "metodo": metodo,
+        "pares_validos": int(len(pares)),
         "correlacao": round(float(valor), 4),
-        "interpretacao": f"{interpretacao} e {sinal}",
+        "interpretacao": f"{intensidade} e {sinal}",
     }
 
 
-# ============================================================
-# detectar_outliers
-# ============================================================
-
 @tool(
-    description=(
-        "Detecta outliers em uma coluna numérica. "
-        "Métodos disponíveis: 'iqr' (intervalo interquartil) ou 'zscore'."
-    ),
+    description="Detecta outliers em coluna numérica por IQR ou z-score.",
     parameters={
         "type": "object",
         "properties": {
@@ -90,27 +71,22 @@ def correlacao(coluna_a: str, coluna_b: str, metodo: str = "pearson") -> dict:
             "metodo": {
                 "type": "string",
                 "enum": ["iqr", "zscore"],
-                "description": "Método de detecção (default: iqr).",
+                "description": "Método. Default: iqr.",
             },
         },
         "required": ["coluna"],
     },
 )
 def detectar_outliers(coluna: str, metodo: str = "iqr") -> dict:
-    """
-    Detecta outliers em uma coluna.
-
-    IQR: outlier se valor < Q1 - 1.5*IQR ou valor > Q3 + 1.5*IQR.
-    Z-score: outlier se |z| > 3.
-    """
     df = state.require_loaded()
-
     if coluna not in df.columns:
         return {"erro": f"Coluna '{coluna}' não existe."}
     if not pd.api.types.is_numeric_dtype(df[coluna]):
         return {"erro": f"Coluna '{coluna}' não é numérica."}
 
     serie = df[coluna].dropna()
+    if serie.empty:
+        return {"erro": f"Coluna '{coluna}' não possui valores válidos."}
 
     if metodo == "iqr":
         q1 = serie.quantile(0.25)
@@ -119,48 +95,33 @@ def detectar_outliers(coluna: str, metodo: str = "iqr") -> dict:
         limite_inf = q1 - 1.5 * iqr
         limite_sup = q3 + 1.5 * iqr
         outliers = serie[(serie < limite_inf) | (serie > limite_sup)]
-
         return {
             "coluna": coluna,
             "metodo": "iqr",
-            "limite_inferior": round(float(limite_inf), 3),
-            "limite_superior": round(float(limite_sup), 3),
+            "limite_inferior": round(float(limite_inf), 4),
+            "limite_superior": round(float(limite_sup), 4),
             "total_outliers": int(len(outliers)),
             "porcentagem": round(len(outliers) / len(serie) * 100, 2),
-            "exemplos": [round(float(v), 3) for v in outliers.head(5).tolist()],
+            "exemplos": [round(float(v), 4) for v in outliers.sort_values(ascending=False).head(5)],
         }
 
-    elif metodo == "zscore":
+    if metodo == "zscore":
         media = serie.mean()
         desvio = serie.std(ddof=0)
-
         if desvio == 0 or pd.isna(desvio):
-            return {
-                "coluna": coluna,
-                "metodo": "zscore",
-                "erro": "Não é possível calcular z-score: desvio-padrão igual a zero ou inválido."
-            }
-        zscores = (serie - media) / desvio
-        outliers = serie[zscores.abs() > 3]
-
+            return {"erro": "Desvio-padrão zero; z-score não pode ser calculado."}
+        z = (serie - media) / desvio
+        outliers = serie[np.abs(z) > 3]
+        exemplos = outliers.sort_values(ascending=False).head(5)
         return {
             "coluna": coluna,
             "metodo": "zscore",
-            "media": round(float(media), 3),
-            "desvio_padrao": round(float(desvio), 3),
+            "media": round(float(media), 4),
+            "desvio_padrao": round(float(desvio), 4),
             "limite_z": 3,
             "total_outliers": int(len(outliers)),
             "porcentagem": round(len(outliers) / len(serie) * 100, 2),
-            "exemplos": [round(float(v), 3) for v in outliers.head(5).tolist()]
+            "exemplos": [round(float(v), 4) for v in exemplos],
         }
-        # TODO (alunos): implementar a detecção por z-score.
-        #
-        # Passos:
-        #   1. Calcular média e desvio-padrão da série.
-        #   2. Calcular o z-score para cada valor: z = (x - media) / std
-        #   3. Considerar outliers aqueles com |z| > 3.
-        #   4. Retornar dict no mesmo formato do método 'iqr' acima
-        #      (adapte os campos para refletir z-score: limite_z, etc).
-        return {"erro": "Método z-score ainda não implementado. Veja o TODO no código."}
 
-    return {"erro": f"Método '{metodo}' não reconhecido."}
+    return {"erro": f"Método '{metodo}' não reconhecido. Use 'iqr' ou 'zscore'."}

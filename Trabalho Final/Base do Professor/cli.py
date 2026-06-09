@@ -11,6 +11,13 @@ Comandos especiais durante a sessão:
     /ajuda        - lista de comandos
 """
 
+"""Interface de linha de comando do agente.
+
+Execute:
+    python cli.py
+"""
+from __future__ import annotations
+
 import sys
 from pathlib import Path
 
@@ -19,132 +26,135 @@ from rich.panel import Panel
 from rich.table import Table
 
 from agent import Agent
-from tools import state
 from config import DATASET_PATH
-
+from tools import state
 
 console = Console()
 
 
-def imprimir_boas_vindas():
-    console.print(Panel.fit(
-        "[bold blue]Agente EDA[/bold blue] — Análise de CSV em linguagem natural\n"
-        "Digite sua pergunta e pressione Enter. /ajuda para comandos.",
-        border_style="blue",
-    ))
+def imprimir_boas_vindas() -> None:
+    console.print(
+        Panel.fit(
+            "[bold blue]Agente EDA COVID-19[/bold blue]\n"
+            "Pergunte em português sobre o CSV carregado. Digite /ajuda para comandos.",
+            border_style="blue",
+        )
+    )
 
 
-def imprimir_ajuda():
+def imprimir_ajuda() -> None:
     tabela = Table(title="Comandos disponíveis")
     tabela.add_column("Comando", style="cyan")
     tabela.add_column("Descrição")
     tabela.add_row("/sair", "Encerra a sessão")
-    tabela.add_row("/trajetoria", "Mostra a trajetória da última pergunta")
-    tabela.add_row("/custo", "Mostra tokens e tempo acumulados")
-    tabela.add_row("/ajuda", "Esta tabela")
+    tabela.add_row("/ajuda", "Mostra esta ajuda")
+    tabela.add_row("/trajetoria", "Mostra tools chamadas na última pergunta")
+    tabela.add_row("/custo", "Mostra tokens, latência e tool calls acumulados")
+    tabela.add_row("/colunas", "Mostra colunas carregadas sem chamar LLM")
     console.print(tabela)
 
 
-def imprimir_trajetoria(resultado):
-    if resultado is None:
-        console.print("[yellow]Sem trajetória — faça uma pergunta primeiro.[/yellow]")
-        return
+def imprimir_colunas() -> None:
+    df = state.require_loaded()
+    tabela = Table(title="Colunas do dataset")
+    tabela.add_column("Coluna", style="cyan")
+    tabela.add_column("Tipo")
+    tabela.add_column("Nulos", justify="right")
+    for col in df.columns:
+        tabela.add_row(col, str(df[col].dtype), str(int(df[col].isna().sum())))
+    console.print(tabela)
 
-    tabela = Table(title=f"Trajetória: {resultado.pergunta[:60]}")
-    tabela.add_column("#", style="dim", width=3)
+
+def imprimir_trajetoria(resultado) -> None:
+    if resultado is None:
+        console.print("[yellow]Sem trajetória. Faça uma pergunta primeiro.[/yellow]")
+        return
+    tabela = Table(title=f"Trajetória: {resultado.pergunta[:70]}")
+    tabela.add_column("#", style="dim", width=4)
     tabela.add_column("Tipo", style="cyan")
     tabela.add_column("Conteúdo")
-
     for i, passo in enumerate(resultado.trajetoria, start=1):
-        if passo.tipo == "llm_text":
-            conteudo = passo.conteudo[:120] + ("..." if len(passo.conteudo) > 120 else "")
-        elif passo.tipo == "tool_call":
-            args_str = ", ".join(f"{k}={v}" for k, v in passo.conteudo["argumentos"].items())
-            conteudo = f"[green]{passo.conteudo['nome']}[/green]({args_str})"
-        else:  # tool_result
-            conteudo = str(passo.conteudo)[:120]
+        conteudo = str(passo.conteudo)
+        if len(conteudo) > 220:
+            conteudo = conteudo[:220] + "..."
         tabela.add_row(str(i), passo.tipo, conteudo)
-
     console.print(tabela)
 
 
-def main():
-    # 1. Verifica que o dataset existe
+def main() -> None:
     if not Path(DATASET_PATH).exists():
         console.print(
             f"[red]Erro:[/red] dataset não encontrado em {DATASET_PATH}.\n"
-            "Coloque seu CSV na pasta data/ e ajuste DATASET_PATH em config.py."
+            "Coloque covid19.csv na pasta data/ ou ajuste DATASET_PATH no .env."
         )
         sys.exit(1)
 
-    # 2. Carrega o dataset
     state.load(str(DATASET_PATH))
     console.print(
         f"[green]✓[/green] Dataset carregado: [bold]{DATASET_PATH.name}[/bold] "
-        f"({len(state.df)} linhas × {len(state.df.columns)} colunas)\n"
+        f"({len(state.df)} linhas × {len(state.df.columns)} colunas)"
     )
 
-    # 3. Inicializa o agente
     try:
         agente = Agent()
     except RuntimeError as e:
-        console.print(f"[red]Erro:[/red] {e}")
+        console.print(f"[red]Erro ao inicializar LLM:[/red] {e}")
         sys.exit(1)
 
     imprimir_boas_vindas()
-
-    # 4. Sessão interativa
     ultima_resposta = None
-    custo_acumulado = {"input": 0, "output": 0, "latencia": 0.0, "tool_calls": 0}
+    custo = {"input": 0, "output": 0, "latencia": 0.0, "tool_calls": 0}
 
     while True:
         try:
             pergunta = console.input("\n[bold cyan]> [/bold cyan]").strip()
         except (EOFError, KeyboardInterrupt):
-            console.print("\n[dim]Até mais.[/dim]")
+            console.print("\n[dim]Encerrado.[/dim]")
             break
 
         if not pergunta:
             continue
-
-        # Comandos especiais
         if pergunta == "/sair":
-            console.print("[dim]Até mais.[/dim]")
+            console.print("[dim]Encerrado.[/dim]")
             break
-        elif pergunta == "/ajuda":
+        if pergunta == "/ajuda":
             imprimir_ajuda()
             continue
-        elif pergunta == "/trajetoria":
+        if pergunta == "/colunas":
+            imprimir_colunas()
+            continue
+        if pergunta == "/trajetoria":
             imprimir_trajetoria(ultima_resposta)
             continue
-        elif pergunta == "/custo":
+        if pergunta == "/custo":
             console.print(
-                f"Tokens entrada: {custo_acumulado['input']}\n"
-                f"Tokens saída:   {custo_acumulado['output']}\n"
-                f"Tool calls:     {custo_acumulado['tool_calls']}\n"
-                f"Latência total: {custo_acumulado['latencia']:.2f}s"
+                f"Tokens entrada: {custo['input']}\n"
+                f"Tokens saída: {custo['output']}\n"
+                f"Tool calls: {custo['tool_calls']}\n"
+                f"Latência total: {custo['latencia']:.2f}s"
             )
             continue
 
-        # Pergunta normal — chama o agente
-        with console.status("[dim]Pensando...[/dim]"):
+        with console.status("[dim]Consultando DeepSeek e executando tools...[/dim]"):
             resultado = agente.perguntar(pergunta)
 
         ultima_resposta = resultado
-        custo_acumulado["input"] += resultado.input_tokens
-        custo_acumulado["output"] += resultado.output_tokens
-        custo_acumulado["latencia"] += resultado.latencia_total
-        custo_acumulado["tool_calls"] += resultado.total_tool_calls
+        custo["input"] += resultado.input_tokens
+        custo["output"] += resultado.output_tokens
+        custo["latencia"] += resultado.latencia_total
+        custo["tool_calls"] += resultado.total_tool_calls
 
-        # Imprime resposta
-        cor_borda = "green" if resultado.sucesso else "red"
-        console.print(Panel(
-            resultado.resposta_final,
-            border_style=cor_borda,
-            title=f"[dim]{resultado.total_tool_calls} tool calls · "
-                  f"{resultado.latencia_total:.2f}s · "
-                  f"{resultado.input_tokens + resultado.output_tokens} tokens[/dim]",
-        ))
+        console.print(
+            Panel(
+                resultado.resposta_final,
+                border_style="green" if resultado.sucesso else "red",
+                title=(
+                    f"[dim]{resultado.total_tool_calls} tool calls · "
+                    f"{resultado.latencia_total:.2f}s · "
+                    f"{resultado.input_tokens + resultado.output_tokens} tokens[/dim]"
+                ),
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -1,62 +1,37 @@
-"""
-Agente principal.
-
-Implementa o loop de raciocínio:
-
-    pergunta_usuario
-        |
-        v
-    [LLM raciocina sobre o que fazer]
-        |
-        v
-    LLM gerou tool_call? --- sim ---> [executa tool] --- adiciona resultado ---+
-        |                                                                      |
-        | não (stop_reason == 'end_turn')                                       |
-        v                                                                      |
-    [resposta final em texto]                                                  |
-        ^                                                                      |
-        |                                                                      |
-        +----------------------------------------------------------------------+
-
-Limitamos a MAX_AGENT_ITERATIONS para evitar loops infinitos.
-"""
-
+"""Agente principal: loop ReAct (pensar -> agir -> observar)."""
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from datetime import datetime
 import json
+from typing import Any
+
+from config import LLM_PROVIDER, MAX_AGENT_ITERATIONS
+from tools import all_tools_for_llm, get_tool_by_name, state
 
 from .llm_client import LLMClient, LLMResponse
-from tools import all_tools_for_llm, get_tool_by_name, state
-from config import MAX_AGENT_ITERATIONS
 
-
-# ============================================================
-# Estruturas para registrar a trajetória do agente
-# ============================================================
 
 @dataclass
 class Step:
-    """Um passo da trajetória: ou um pensamento do LLM, ou uma chamada de tool."""
-    tipo: str                              # 'llm_text' | 'tool_call' | 'tool_result'
-    conteudo: dict | str
+    tipo: str  # llm_text | tool_call | tool_result | erro
+    conteudo: dict[str, Any] | str
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
 @dataclass
 class AgentResult:
-    """Resultado completo de uma pergunta processada pelo agente."""
     pergunta: str
     resposta_final: str
-    sucesso: bool                          # Terminou normalmente?
-    trajetoria: list[Step]                 # Cada passo intermediário
+    sucesso: bool
+    trajetoria: list[Step]
     total_iteracoes: int
     total_tool_calls: int
     input_tokens: int
     output_tokens: int
     latencia_total: float
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "pergunta": self.pergunta,
             "resposta_final": self.resposta_final,
@@ -65,125 +40,77 @@ class AgentResult:
             "total_tool_calls": self.total_tool_calls,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
-            "latencia_total": round(self.latencia_total, 3),
-            "trajetoria": [
-                {"tipo": s.tipo, "conteudo": s.conteudo, "timestamp": s.timestamp}
-                for s in self.trajetoria
-            ],
+            "latencia_total": round(self.latencia_total, 4),
+            "trajetoria": [s.__dict__ for s in self.trajetoria],
         }
 
 
-# ============================================================
-# Prompt de sistema
-# ============================================================
+SYSTEM_PROMPT = """
+Você é um agente de análise exploratória de dados (EDA) em português.
 
-SYSTEM_PROMPT = """\
-Você é um assistente de análise exploratória de dados.
+Contexto do dataset carregado: COVID-19 Brasil.IO por município.
+Colunas esperadas: date, state, city, place_type, confirmed, deaths, is_last,
+estimated_population, city_ibge_code, confirmed_per_100k_inhabitants, death_rate.
 
-Sua tarefa é responder perguntas em português sobre um arquivo CSV que está
-carregado em memória. Você NÃO tem acesso direto aos dados — você precisa
-chamar as ferramentas (tools) disponíveis para inspecionar e operar sobre
-o dataset.
+Regras obrigatórias:
+1. Responda com fatos calculados pelas tools. Não invente valores.
+2. Se não souber as colunas, chame listar_colunas antes de operar.
+3. Use nomes exatos de colunas.
+4. Para rankings de municípios, prefira top_municipios.
+5. Para comparação entre estados, prefira resumir_por_estado, pois ela calcula taxas por soma agregada.
+6. Para perguntas ambíguas, peça esclarecimento ou diga que não é possível responder.
+7. Não faça previsão/modelagem preditiva; se pedirem previsão, explique que está fora do escopo.
+8. Use o menor número de tool calls necessário.
+9. Formate números em português e explique rapidamente qual cálculo foi feito.
+""".strip()
 
-Diretrizes:
-1. Sempre que receber uma pergunta nova, considere chamar listar_colunas()
-   primeiro se ainda não conhecer a estrutura do dataset.
-2. Use os NOMES EXATOS das colunas como retornados por listar_colunas().
-   Não invente colunas — se uma coluna mencionada pelo usuário não existir,
-   peça esclarecimento ou avise.
-3. Se a pergunta for ambígua ou impossível de responder com os dados
-   disponíveis, diga isso explicitamente em vez de inventar uma resposta.
-4. Use o menor número de tool calls necessário. Não chame tools redundantes.
-5. Quando responder ao usuário, seja conciso e em português claro. Apresente
-   números com formato legível (ex.: 1.234,56 em vez de 1234.5612).
-"""
-
-
-# ============================================================
-# Classe Agent
-# ============================================================
 
 class Agent:
-    """Orquestrador do loop de raciocínio do agente."""
-
     def __init__(self, llm: LLMClient | None = None):
         self.llm = llm or LLMClient()
-        self.tools_para_llm = all_tools_for_llm()
+        provider = getattr(self.llm, "tool_format", LLM_PROVIDER)
+        self.tools_para_llm = all_tools_for_llm(provider)
 
-    def _executar_tool(self, tool_call: dict) -> dict:
-        """
-        Executa uma tool e retorna seu resultado.
+    def _executar_tool(self, tool_call: dict[str, Any]) -> dict[str, Any]:
+        nome = tool_call.get("name")
+        argumentos = tool_call.get("input", {}) or {}
+        if "_raw_arguments" in argumentos:
+            return {"erro": f"Argumentos da tool vieram em JSON inválido: {argumentos['_raw_arguments']}"}
 
-        Captura exceções para o agente nunca travar - se a tool falhar,
-        o erro é devolvido ao LLM, que pode tentar outra abordagem.
-        """
-        nome = tool_call["name"]
-        argumentos = tool_call["input"]
         spec = get_tool_by_name(nome)
-
         if spec is None:
-            return {"erro": f"Tool '{nome}' não encontrada no registro."}
+            return {"erro": f"Tool '{nome}' não encontrada."}
 
         try:
             return spec.function(**argumentos)
         except TypeError as e:
-            # Argumentos errados
             return {"erro": f"Argumentos inválidos para '{nome}': {e}"}
-        except Exception as e:
-            # Qualquer outro erro
+        except Exception as e:  # salvaguarda: o agente não deve quebrar
             return {"erro": f"Erro ao executar '{nome}': {type(e).__name__}: {e}"}
 
     def perguntar(self, pergunta: str) -> AgentResult:
-        """
-        Processa uma pergunta e retorna o resultado completo, incluindo
-        toda a trajetória para análise posterior.
-        """
-        # Verifica se tem dataset carregado antes de começar
         try:
             state.require_loaded()
         except RuntimeError as e:
-            return AgentResult(
-                pergunta=pergunta,
-                resposta_final=str(e),
-                sucesso=False,
-                trajetoria=[],
-                total_iteracoes=0,
-                total_tool_calls=0,
-                input_tokens=0,
-                output_tokens=0,
-                latencia_total=0.0,
-            )
+            return AgentResult(pergunta, str(e), False, [], 0, 0, 0, 0, 0.0)
 
-        # Histórico no formato Anthropic
-        messages: list[dict] = [
-            {"role": "user", "content": pergunta},
-        ]
-
+        messages: list[dict[str, Any]] = [{"role": "user", "content": pergunta}]
         trajetoria: list[Step] = []
         total_input = 0
         total_output = 0
         latencia_total = 0.0
         total_tool_calls = 0
 
-        # ============ Loop principal ============
         for iteracao in range(MAX_AGENT_ITERATIONS):
-
-            resposta: LLMResponse = self.llm.chat(
-                messages=messages,
-                tools=self.tools_para_llm,
-                system=SYSTEM_PROMPT,
-            )
-
+            resposta: LLMResponse = self.llm.chat(messages=messages, tools=self.tools_para_llm, system=SYSTEM_PROMPT)
             total_input += resposta.input_tokens
             total_output += resposta.output_tokens
             latencia_total += resposta.latency_seconds
 
-            # Registra o que o LLM "pensou"/disse
             if resposta.text:
-                trajetoria.append(Step(tipo="llm_text", conteudo=resposta.text))
+                trajetoria.append(Step("llm_text", resposta.text))
 
-            # Caso 1: LLM terminou (sem tool_use) — temos a resposta final
-            if resposta.stop_reason == "end_turn" or not resposta.tool_calls:
+            if not resposta.tool_calls:
                 return AgentResult(
                     pergunta=pergunta,
                     resposta_final=resposta.text or "(sem resposta)",
@@ -196,45 +123,24 @@ class Agent:
                     latencia_total=latencia_total,
                 )
 
-            # Caso 2: LLM quer chamar uma ou mais tools
-            # Devemos adicionar ao histórico TODO o conteúdo retornado pelo LLM
-            # (texto + tool_uses), e em seguida os tool_results.
-            messages.append({
-                "role": "assistant",
-                "content": resposta.raw_response.content,
-            })
+            messages.append(resposta.raw_message)
 
-            tool_results_para_llm = []
             for tc in resposta.tool_calls:
                 total_tool_calls += 1
-                trajetoria.append(Step(
-                    tipo="tool_call",
-                    conteudo={"nome": tc["name"], "argumentos": tc["input"]},
-                ))
-
+                trajetoria.append(Step("tool_call", {"nome": tc["name"], "argumentos": tc["input"]}))
                 resultado = self._executar_tool(tc)
+                trajetoria.append(Step("tool_result", resultado))
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": json.dumps(resultado, ensure_ascii=False, default=str),
+                    }
+                )
 
-                trajetoria.append(Step(tipo="tool_result", conteudo=resultado))
-
-                tool_results_para_llm.append({
-                    "type": "tool_result",
-                    "tool_use_id": tc["id"],
-                    "content": json.dumps(resultado, ensure_ascii=False, default=str),
-                })
-
-            # Adiciona os resultados como mensagem do usuário (convenção Anthropic)
-            messages.append({
-                "role": "user",
-                "content": tool_results_para_llm,
-            })
-
-        # Saiu do loop sem terminar — atingiu MAX_AGENT_ITERATIONS
         return AgentResult(
             pergunta=pergunta,
-            resposta_final=(
-                f"Limite de {MAX_AGENT_ITERATIONS} iterações atingido sem "
-                "chegar a uma resposta final."
-            ),
+            resposta_final=f"Limite de {MAX_AGENT_ITERATIONS} iterações atingido sem resposta final.",
             sucesso=False,
             trajetoria=trajetoria,
             total_iteracoes=MAX_AGENT_ITERATIONS,

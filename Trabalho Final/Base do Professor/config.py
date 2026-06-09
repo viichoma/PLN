@@ -1,15 +1,15 @@
-"""
-Configurações centralizadas do projeto.
+"""Configurações centralizadas do projeto.
 
-Tudo que pode variar entre execuções (caminhos, modelo, limites) fica aqui.
-Assim os alunos não precisam caçar valores espalhados pelo código.
+Tudo que varia entre execuções fica aqui: caminhos, modelo, limites e chaves.
+O projeto foi adaptado para DeepSeek usando a API compatível com OpenAI.
 """
+from __future__ import annotations
 
 import os
 from pathlib import Path
+
 from dotenv import load_dotenv
 
-# Carrega variáveis do .env automaticamente
 load_dotenv()
 
 # ============================================================
@@ -21,42 +21,37 @@ OUTPUTS_DIR = ROOT_DIR / "outputs"
 LOGS_DIR = ROOT_DIR / "logs"
 EVAL_DIR = ROOT_DIR / "evaluation"
 
-# Garante que as pastas existem
-for d in [DATA_DIR, OUTPUTS_DIR, LOGS_DIR]:
-    d.mkdir(exist_ok=True)
+for directory in (DATA_DIR, OUTPUTS_DIR, LOGS_DIR):
+    directory.mkdir(exist_ok=True)
 
 # ============================================================
 # DATASET
 # ============================================================
-# FEITO: alterar para o arquivo CSV do seu grupo.
-DATASET_PATH = DATA_DIR / "covid19.csv"
+DATASET_PATH = Path(os.getenv("DATASET_PATH", str(DATA_DIR / "covid19.csv")))
+CSV_SEPARATOR = os.getenv("CSV_SEPARATOR", ",")
 
 # ============================================================
-# LLM
+# LLM / DEEPSEEK
 # ============================================================
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic").lower()
-LLM_MODEL = os.getenv("LLM_MODEL", "claude-haiku-4-5")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "deepseek").lower()
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+# Em 2026 a documentação da DeepSeek recomenda deepseek-v4-flash/pro.
+# deepseek-chat ainda pode funcionar, mas está marcado para depreciação.
+LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-v4-flash")
 
-# Chaves de API (lidas do .env)
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+# Desative thinking para reduzir custo/latência e melhorar tool-calling no modo simples.
+DEEPSEEK_THINKING = os.getenv("DEEPSEEK_THINKING", "disabled")
+REASONING_EFFORT = os.getenv("REASONING_EFFORT", "high")
 
 # ============================================================
 # AGENTE
 # ============================================================
-# Quantas iterações no máximo o agente pode fazer antes de desistir.
-# Evita loops infinitos quando o agente fica confuso.
-MAX_AGENT_ITERATIONS = 10
-
-# Quantos tokens no máximo o LLM pode gerar por resposta.
-MAX_TOKENS_PER_RESPONSE = 1024
+MAX_AGENT_ITERATIONS = int(os.getenv("MAX_AGENT_ITERATIONS", "8"))
+MAX_TOKENS_PER_RESPONSE = int(os.getenv("MAX_TOKENS_PER_RESPONSE", "900"))
 
 # ============================================================
 # AVALIAÇÃO
 # ============================================================
 BENCHMARK_FILE = EVAL_DIR / "benchmark.json"
-
-# Tolerância numérica para considerar duas respostas iguais
-# (ex.: 100.0 e 100.001 devem ser tratadas como iguais)
-NUMERIC_TOLERANCE = 1e-2
+NUMERIC_TOLERANCE = float(os.getenv("NUMERIC_TOLERANCE", "0.05"))

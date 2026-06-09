@@ -1,107 +1,112 @@
+"""Cliente do LLM usando DeepSeek via SDK OpenAI.
+
+A DeepSeek expõe uma API compatível com OpenAI. Mantemos esta camada isolada
+para que o restante do projeto não dependa de detalhes do provedor.
 """
-Cliente da API do LLM.
-
-Encapsula a chamada à API para que o resto do código não precise
-saber qual provedor está sendo usado. Se quiserem trocar de provedor,
-mexem APENAS aqui.
-
-Este arquivo já vem implementado para a API da Anthropic.
-Para usar outros provedores, criem variantes (LLMClientOpenAI etc).
-"""
-
 from __future__ import annotations
-from dataclasses import dataclass
-import time
 
-from anthropic import Anthropic
+from dataclasses import dataclass
+import json
+import time
+from typing import Any
+
+from openai import OpenAI
 
 from config import (
-    ANTHROPIC_API_KEY,
+    DEEPSEEK_API_KEY,
+    DEEPSEEK_BASE_URL,
+    DEEPSEEK_THINKING,
     LLM_MODEL,
     MAX_TOKENS_PER_RESPONSE,
+    REASONING_EFFORT,
 )
 
 
-# ============================================================
-# Estruturas de retorno
-# ============================================================
-
 @dataclass
 class LLMResponse:
-    """Resposta tipada do LLM, independente do provedor."""
-    text: str                          # Texto livre gerado (pode ser vazio)
-    tool_calls: list[dict]             # Lista de chamadas de tool (pode ser vazia)
-    raw_response: object               # Resposta crua do SDK (para debug)
-    input_tokens: int                  # Tokens enviados
-    output_tokens: int                 # Tokens gerados
-    stop_reason: str                   # 'end_turn', 'tool_use', etc.
-    latency_seconds: float             # Tempo da chamada
+    text: str
+    tool_calls: list[dict[str, Any]]
+    raw_response: object
+    raw_message: dict[str, Any]
+    input_tokens: int
+    output_tokens: int
+    stop_reason: str
+    latency_seconds: float
 
-
-# ============================================================
-# Cliente Anthropic
-# ============================================================
 
 class LLMClient:
-    """Cliente que se comunica com a API da Anthropic (Claude)."""
+    """Cliente DeepSeek/OpenAI-compatible."""
 
-    def __init__(self, model: str = LLM_MODEL, api_key: str = ANTHROPIC_API_KEY):
+    tool_format = "deepseek"
+
+    def __init__(self, model: str = LLM_MODEL, api_key: str = DEEPSEEK_API_KEY):
         if not api_key:
-            raise RuntimeError(
-                "ANTHROPIC_API_KEY não definida. Configure no arquivo .env."
-            )
-        self.client = Anthropic(api_key=api_key)
+            raise RuntimeError("DEEPSEEK_API_KEY não definida. Copie .env.example para .env e preencha a chave.")
+        self.client = OpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
         self.model = model
 
-    def chat(
-        self,
-        messages: list[dict],
-        tools: list[dict],
-        system: str = "",
-    ) -> LLMResponse:
-        """
-        Envia uma rodada de mensagens ao LLM.
-
-        Args:
-            messages: histórico no formato Anthropic.
-            tools: lista de tools disponíveis (formato Anthropic).
-            system: prompt de sistema (instruções gerais do agente).
-
-        Returns:
-            LLMResponse com texto, chamadas de tool e métricas.
-        """
-        kwargs = {
-            "model": self.model,
-            "max_tokens": MAX_TOKENS_PER_RESPONSE,
-            "messages": messages,
-            "tools": tools,
-        }
+    def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], system: str = "") -> LLMResponse:
+        full_messages = []
         if system:
-            kwargs["system"] = system
+            full_messages.append({"role": "system", "content": system})
+        full_messages.extend(messages)
+
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": full_messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            "max_tokens": MAX_TOKENS_PER_RESPONSE,
+            "stream": False,
+        }
+
+        # A API atual da DeepSeek aceita thinking via extra_body.
+        # Caso o modelo/conta ignore, a chamada segue normal.
+        if DEEPSEEK_THINKING in {"enabled", "disabled"}:
+            kwargs["extra_body"] = {"thinking": {"type": DEEPSEEK_THINKING}}
+            kwargs["reasoning_effort"] = REASONING_EFFORT
 
         inicio = time.perf_counter()
-        resp = self.client.messages.create(**kwargs)
+        resp = self.client.chat.completions.create(**kwargs)
         latencia = time.perf_counter() - inicio
 
-        # Extrai blocos de texto e de tool_use da resposta
-        texto = ""
+        choice = resp.choices[0]
+        message = choice.message
+        texto = message.content or ""
+
         tool_calls = []
-        for bloco in resp.content:
-            if bloco.type == "text":
-                texto += bloco.text
-            elif bloco.type == "tool_use":
-                tool_calls.append({
-                    "id": bloco.id,
-                    "name": bloco.name,
-                    "input": bloco.input,
-                })
+        raw_tool_calls = []
+        if message.tool_calls:
+            for tc in message.tool_calls:
+                args_text = tc.function.arguments or "{}"
+                try:
+                    args = json.loads(args_text)
+                except json.JSONDecodeError:
+                    args = {"_raw_arguments": args_text}
+                tool_calls.append({"id": tc.id, "name": tc.function.name, "input": args})
+                raw_tool_calls.append(
+                    {
+                        "id": tc.id,
+                        "type": tc.type,
+                        "function": {"name": tc.function.name, "arguments": args_text},
+                    }
+                )
+
+        raw_message = {"role": "assistant", "content": texto or None}
+        if raw_tool_calls:
+            raw_message["tool_calls"] = raw_tool_calls
+
+        usage = getattr(resp, "usage", None)
+        input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
 
         return LLMResponse(
             text=texto,
             tool_calls=tool_calls,
             raw_response=resp,
-            input_tokens=resp.usage.input_tokens,
-            output_tokens=resp.usage.output_tokens,
-            stop_reason=resp.stop_reason,
+            raw_message=raw_message,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            stop_reason=choice.finish_reason or "unknown",
             latency_seconds=latencia,
         )
