@@ -62,9 +62,9 @@ class LLMClient:
 
         # A API atual da DeepSeek aceita thinking via extra_body.
         # Caso o modelo/conta ignore, a chamada segue normal.
-        if DEEPSEEK_THINKING in {"enabled", "disabled"}:
-            kwargs["extra_body"] = {"thinking": {"type": DEEPSEEK_THINKING}}
-            kwargs["reasoning_effort"] = REASONING_EFFORT
+        # if DEEPSEEK_THINKING in {"enabled", "disabled"}:
+            # kwargs["extra_body"] = {"thinking": {"type": DEEPSEEK_THINKING}}
+            # kwargs["reasoning_effort"] = REASONING_EFFORT
 
         inicio = time.perf_counter()
         resp = self.client.chat.completions.create(**kwargs)

@@ -1,16 +1,3 @@
-"""
-Interface de linha de comando (CLI) do agente.
-
-Execute com:
-    python cli.py
-
-Comandos especiais durante a sessão:
-    /sair         - encerra
-    /trajetoria   - mostra a trajetória da última pergunta
-    /custo        - mostra custo/tokens acumulados na sessão
-    /ajuda        - lista de comandos
-"""
-
 """Interface de linha de comando do agente.
 
 Execute:
